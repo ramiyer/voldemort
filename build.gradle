@@ -633,6 +633,14 @@ dependencies {
     compile 'com.linkedin.gobblin:gobblin-runtime:0.11.0', gobblinExcludes
     compile 'com.linkedin.gobblin:gobblin-data-management:0.11.0', gobblinExcludes
     compile 'com.linkedin.gobblin:gobblin-throttling-service-client:0.11.0', gobblinExcludes
+
+    compile group: 'io.jaegertracing', name: 'jaeger-core', version: '0.32.0'
+    compile group: 'io.jaegertracing', name: 'jaeger-client', version: '0.32.0'
+
+    compile group: 'io.opentracing', name: 'opentracing-api', version: '0.31.0'
+    compile group: 'io.opentracing', name: 'opentracing-util', version: '0.31.0'
+	
+
 }
 
 subprojects {
