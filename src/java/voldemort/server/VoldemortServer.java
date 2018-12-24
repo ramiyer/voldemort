@@ -28,6 +28,9 @@ import java.util.List;
 import org.apache.commons.io.IOUtils;
 import org.apache.log4j.Logger;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
+
 import voldemort.VoldemortApplicationException;
 import voldemort.VoldemortException;
 import voldemort.annotations.jmx.JmxOperation;
@@ -60,6 +63,7 @@ import voldemort.store.metadata.MetadataStore;
 import voldemort.store.readonly.ReadOnlyStorageEngine;
 import voldemort.store.readonly.StoreVersionManager;
 import voldemort.store.readonly.swapper.FailedFetchLock;
+import voldemort.tracer.VoldemortTracer;
 import voldemort.utils.ByteArray;
 import voldemort.utils.JNAUtils;
 import voldemort.utils.Props;
@@ -68,9 +72,6 @@ import voldemort.utils.Utils;
 import voldemort.versioning.VectorClock;
 import voldemort.versioning.Versioned;
 import voldemort.xml.ClusterMapper;
-
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
 
 /**
  * This is the main server, it bootstraps all the services.
@@ -82,7 +83,6 @@ import com.google.common.collect.Lists;
 public class VoldemortServer extends AbstractService {
 
     private static final Logger logger = Logger.getLogger(VoldemortServer.class.getName());
-    public static final long DEFAULT_PUSHER_POLL_MS = 60 * 1000;
 
     private final static int ASYNC_REQUEST_CACHE_SIZE = 64;
 
@@ -109,6 +109,7 @@ public class VoldemortServer extends AbstractService {
 
         this.validateRestServiceConfiguration();
         this.basicServices = createBasicServices();
+        VoldemortTracer.configure("voldemort");
         createOnlineServices();
     }
 
