@@ -1,12 +1,12 @@
 /*
  * Copyright 2008-2009 LinkedIn, Inc
- * 
+ *
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not
  * use this file except in compliance with the License. You may obtain a copy of
  * the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
  * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
@@ -16,14 +16,21 @@
 
 package voldemort.store.stats;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import io.opentracing.Scope;
+import io.opentracing.Span;
+import io.opentracing.log.Fields;
+import io.opentracing.tag.Tags;
 
 import voldemort.VoldemortException;
 import voldemort.store.CompositeVoldemortRequest;
 import voldemort.store.DelegatingStore;
 import voldemort.store.Store;
 import voldemort.store.StoreCapabilityType;
+import voldemort.tracer.VoldemortTracer;
 import voldemort.utils.ByteArray;
 import voldemort.versioning.ObsoleteVersionException;
 import voldemort.versioning.Version;
@@ -31,21 +38,19 @@ import voldemort.versioning.Versioned;
 
 /**
  * A store wrapper that tracks basic usage statistics
- * 
- * 
  */
 public class StatTrackingStore extends DelegatingStore<ByteArray, byte[], byte[]> {
 
     private final StoreStats stats;
-    
+
     private StoreStats getOrCreateStoreStats(Map<String, StoreStats> cachedStats,
-                                                          StoreStats parentStats) {
+                                             StoreStats parentStats) {
         if(cachedStats == null) {
             throw new IllegalArgumentException("cachedStats is null");
         }
-        synchronized (cachedStats) {
+        synchronized(cachedStats) {
             String storeName = getName();
-            if (cachedStats.containsKey(storeName)) {
+            if(cachedStats.containsKey(storeName)) {
                 return cachedStats.get(storeName);
             }
             StoreStats storeStats = new StoreStats(getName(), parentStats);
@@ -69,13 +74,20 @@ public class StatTrackingStore extends DelegatingStore<ByteArray, byte[], byte[]
     @Override
     public boolean delete(ByteArray key, Version version) throws VoldemortException {
         long start = System.nanoTime();
-        try {
+        Span span = VoldemortTracer.buildSpan(getClass().getSimpleName() + "-DELETE").start();
+        span.setTag("op", "DELETE");
+        span.setTag("store", super.getName());
+        span.setTag("key", key.toString());
+        try (Scope scope = VoldemortTracer.scopeManager().activate(span, false)) {
             return super.delete(key, version);
         } catch(VoldemortException e) {
+            Tags.ERROR.set(span, true);
+            span.log(buildHashMap(e));
             stats.recordTime(Tracked.EXCEPTION, System.nanoTime() - start);
             throw e;
         } finally {
             stats.recordDeleteTime(System.nanoTime() - start, key.get().length);
+            span.finish();
         }
     }
 
@@ -103,10 +115,17 @@ public class StatTrackingStore extends DelegatingStore<ByteArray, byte[], byte[]
     public List<Versioned<byte[]>> get(ByteArray key, byte[] transforms) throws VoldemortException {
         List<Versioned<byte[]>> result = null;
         long start = System.nanoTime();
-        try {
+        Span span = VoldemortTracer.buildSpan(getClass().getSimpleName() + "-GET").start();
+        span.setTag("op", "GET");
+        span.setTag("store", super.getName());
+        span.setTag("key", key.toString());
+
+        try (Scope scope = VoldemortTracer.scopeManager().activate(span, false)) {
             result = super.get(key, transforms);
             return result;
         } catch(VoldemortException e) {
+            Tags.ERROR.set(span, true);
+            span.log(buildHashMap(e));
             stats.recordTime(Tracked.EXCEPTION, System.nanoTime() - start);
             throw e;
         } finally {
@@ -120,6 +139,7 @@ public class StatTrackingStore extends DelegatingStore<ByteArray, byte[], byte[]
                 }
             }
             stats.recordGetTime(duration, returningEmpty, totalValueBytes, key.get().length);
+            span.finish();
         }
     }
 
@@ -129,10 +149,15 @@ public class StatTrackingStore extends DelegatingStore<ByteArray, byte[], byte[]
             throws VoldemortException {
         Map<ByteArray, List<Versioned<byte[]>>> result = null;
         long start = System.nanoTime();
-        try {
+        Span span = VoldemortTracer.buildSpan(getClass().getSimpleName() + "-GETALL").start();
+        span.setTag("op", "GETALL");
+        span.setTag("store", super.getName());
+        try (Scope scope = VoldemortTracer.scopeManager().activate(span, false)) {
             result = super.getAll(keys, transforms);
             return result;
         } catch(VoldemortException e) {
+            Tags.ERROR.set(span, true);
+            span.log(buildHashMap(e));
             stats.recordTime(Tracked.EXCEPTION, System.nanoTime() - start);
             throw e;
         } finally {
@@ -164,6 +189,8 @@ public class StatTrackingStore extends DelegatingStore<ByteArray, byte[], byte[]
                                    returnedValues,
                                    totalValueBytes,
                                    totalKeyBytes);
+
+            span.finish();
         }
     }
 
@@ -171,27 +198,45 @@ public class StatTrackingStore extends DelegatingStore<ByteArray, byte[], byte[]
     public void put(ByteArray key, Versioned<byte[]> value, byte[] transforms)
             throws VoldemortException {
         long start = System.nanoTime();
-        try {
+        Span span = VoldemortTracer.buildSpan(getClass().getSimpleName() + "-PUT").start();
+        span.setTag("op", "PUT");
+        span.setTag("store", super.getName());
+        span.setTag("key", key.toString());
+        try (Scope scope = VoldemortTracer.scopeManager().activate(span, false)) {
             super.put(key, value, transforms);
         } catch(ObsoleteVersionException e) {
+            Tags.ERROR.set(span, true);
+            span.log(buildHashMap(e));
             stats.recordTime(Tracked.OBSOLETE, System.nanoTime() - start);
             throw e;
         } catch(VoldemortException e) {
+            Tags.ERROR.set(span, true);
+            span.log(buildHashMap(e));
             stats.recordTime(Tracked.EXCEPTION, System.nanoTime() - start);
             throw e;
         } finally {
             stats.recordPutTimeAndSize(System.nanoTime() - start,
                                        value.getValue().length,
                                        key.get().length);
+            span.finish();
         }
+    }
+
+    private Map<String, Object> buildHashMap(Exception e) {
+        Map<String, Object> map = new HashMap<>();
+        map.put(Fields.EVENT, "error");
+        map.put(Fields.ERROR_OBJECT, e);
+        map.put(Fields.MESSAGE, e.getMessage());
+        return map;
     }
 
     @Override
     public Object getCapability(StoreCapabilityType capability) {
-        if(StoreCapabilityType.STAT_TRACKER.equals(capability))
+        if(StoreCapabilityType.STAT_TRACKER.equals(capability)) {
             return this.stats;
-        else
+        } else {
             return super.getCapability(capability);
+        }
     }
 
     public StoreStats getStats() {
@@ -203,10 +248,16 @@ public class StatTrackingStore extends DelegatingStore<ByteArray, byte[], byte[]
             throws VoldemortException {
         List<Versioned<byte[]>> result = null;
         long start = System.nanoTime();
-        try {
+        Span span = VoldemortTracer.buildSpan(getClass().getSimpleName() + "-GET-COMPOSITE-REQ")
+                                   .start();
+        span.setTag("op", "GET-COMPOSITE-REQ");
+        span.setTag("store", super.getName());
+        try (Scope scope = VoldemortTracer.scopeManager().activate(span, false)) {
             result = super.get(request);
             return result;
         } catch(VoldemortException e) {
+            Tags.ERROR.set(span, true);
+            span.log(buildHashMap(e));
             stats.recordTime(Tracked.EXCEPTION, System.nanoTime() - start);
             throw e;
         } finally {
@@ -223,6 +274,7 @@ public class StatTrackingStore extends DelegatingStore<ByteArray, byte[], byte[]
                                 returningEmpty,
                                 totalValueBytes,
                                 request.getKey().get().length);
+            span.finish();
         }
     }
 
@@ -271,7 +323,8 @@ public class StatTrackingStore extends DelegatingStore<ByteArray, byte[], byte[]
     }
 
     @Override
-    public void put(CompositeVoldemortRequest<ByteArray, byte[]> request) throws VoldemortException {
+    public void put(CompositeVoldemortRequest<ByteArray, byte[]> request)
+            throws VoldemortException {
         long start = System.nanoTime();
         try {
             super.put(request);
