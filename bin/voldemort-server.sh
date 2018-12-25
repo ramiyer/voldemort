@@ -45,5 +45,13 @@ if [ -z "$VOLD_OPTS" ]; then
   VOLD_OPTS="-Xmx2G -server -Dcom.sun.management.jmxremote"
 fi
 
+debug_enabled=true
+
+if [[ $2 == $debug_enabled ]]; then
+  VOLD_OPTS="-Xmx2G -server -Dcom.sun.management.jmxremote -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005"
+fi
+
+echo $VOLD_OPTS
+
 export CLASSPATH
 java -Dlog4j.configuration=file://$base_dir/src/java/log4j.properties $VOLD_OPTS voldemort.server.VoldemortServer $@
