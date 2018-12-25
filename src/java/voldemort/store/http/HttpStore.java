@@ -16,6 +16,7 @@
 
 package voldemort.store.http;
 
+import io.opentracing.Scope;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -36,6 +37,7 @@ import voldemort.server.RequestRoutingType;
 import voldemort.store.AbstractStore;
 import voldemort.store.StoreUtils;
 import voldemort.store.UnreachableStoreException;
+import voldemort.tracer.VoldemortTracer;
 import voldemort.utils.ByteArray;
 import voldemort.utils.VoldemortIOUtils;
 import voldemort.versioning.VectorClock;
@@ -71,7 +73,7 @@ public class HttpStore extends AbstractStore<ByteArray, byte[], byte[]> {
     public boolean delete(ByteArray key, Version version) throws VoldemortException {
         StoreUtils.assertValidKey(key);
         DataInputStream input = null;
-        try {
+        try (Scope scope = VoldemortTracer.buildSpan("http-delete").startActive(true)) {
             HttpPost method = new HttpPost(this.storeUrl);
             ByteArrayOutputStream outputBytes = new ByteArrayOutputStream();
             requestFormat.writeDeleteRequest(new DataOutputStream(outputBytes),
@@ -93,7 +95,7 @@ public class HttpStore extends AbstractStore<ByteArray, byte[], byte[]> {
     public List<Versioned<byte[]>> get(ByteArray key, byte[] transforms) throws VoldemortException {
         StoreUtils.assertValidKey(key);
         DataInputStream input = null;
-        try {
+        try (Scope scope = VoldemortTracer.buildSpan("http-get").startActive(true)) {
             HttpPost method = new HttpPost(this.storeUrl);
             ByteArrayOutputStream outputBytes = new ByteArrayOutputStream();
             requestFormat.writeGetRequest(new DataOutputStream(outputBytes),
@@ -117,7 +119,7 @@ public class HttpStore extends AbstractStore<ByteArray, byte[], byte[]> {
             throws VoldemortException {
         StoreUtils.assertValidKeys(keys);
         DataInputStream input = null;
-        try {
+        try (Scope scope = VoldemortTracer.buildSpan("http-getAll").startActive(true)) {
             HttpPost method = new HttpPost(this.storeUrl);
             ByteArrayOutputStream outputBytes = new ByteArrayOutputStream();
             requestFormat.writeGetAllRequest(new DataOutputStream(outputBytes),
@@ -140,7 +142,7 @@ public class HttpStore extends AbstractStore<ByteArray, byte[], byte[]> {
             throws VoldemortException {
         StoreUtils.assertValidKey(key);
         DataInputStream input = null;
-        try {
+        try (Scope scope = VoldemortTracer.buildSpan("http-put").startActive(true)) {
             HttpPost method = new HttpPost(this.storeUrl);
             ByteArrayOutputStream outputBytes = new ByteArrayOutputStream();
             requestFormat.writePutRequest(new DataOutputStream(outputBytes),
@@ -185,7 +187,7 @@ public class HttpStore extends AbstractStore<ByteArray, byte[], byte[]> {
     public List<Version> getVersions(ByteArray key) {
         StoreUtils.assertValidKey(key);
         DataInputStream input = null;
-        try {
+        try (Scope scope = VoldemortTracer.buildSpan("http-getVersions").startActive(true)) {
             HttpPost method = new HttpPost(this.storeUrl);
             ByteArrayOutputStream outputBytes = new ByteArrayOutputStream();
             requestFormat.writeGetVersionRequest(new DataOutputStream(outputBytes),

@@ -16,9 +16,7 @@
 
 package voldemort.store.routed.action;
 
-import java.util.List;
-import java.util.Map;
-
+import io.opentracing.Scope;
 import voldemort.cluster.Node;
 import voldemort.cluster.failuredetector.FailureDetector;
 import voldemort.store.InsufficientZoneResponsesException;
@@ -26,10 +24,14 @@ import voldemort.store.Store;
 import voldemort.store.StoreRequest;
 import voldemort.store.routed.BasicPipelineData;
 import voldemort.store.routed.Pipeline;
-import voldemort.store.routed.Response;
 import voldemort.store.routed.Pipeline.Event;
+import voldemort.store.routed.Response;
+import voldemort.tracer.VoldemortTracer;
 import voldemort.utils.ByteArray;
 import voldemort.utils.Time;
+
+import java.util.List;
+import java.util.Map;
 
 public class PerformZoneSerialRequests<V, PD extends BasicPipelineData<V>> extends
         AbstractKeyBasedAction<ByteArray, V, PD> {
@@ -55,47 +57,50 @@ public class PerformZoneSerialRequests<V, PD extends BasicPipelineData<V>> exten
     public void execute(Pipeline pipeline) {
         List<Node> nodes = pipelineData.getNodes();
 
-        while(pipelineData.getNodeIndex() < nodes.size()
-              && (pipelineData.getZoneResponses().size() + 1) < pipelineData.getZonesRequired()) {
-            Node node = nodes.get(pipelineData.getNodeIndex());
-            long start = System.nanoTime();
+        try (Scope scope = VoldemortTracer.scopeManager().activate(pipelineData.getSpan(), false)) {
 
-            try {
-                Store<ByteArray, byte[], byte[]> store = stores.get(node.getId());
-                V result = storeRequest.request(store);
+            while(pipelineData.getNodeIndex() < nodes.size()
+                  && (pipelineData.getZoneResponses().size() + 1) < pipelineData.getZonesRequired()) {
+                Node node = nodes.get(pipelineData.getNodeIndex());
+                long start = System.nanoTime();
 
-                Response<ByteArray, V> response = new Response<ByteArray, V>(node,
-                                                                             key,
-                                                                             result,
-                                                                             ((System.nanoTime() - start) / Time.NS_PER_MS));
+                try {
+                    Store<ByteArray, byte[], byte[]> store = stores.get(node.getId());
+                    V result = storeRequest.request(store);
 
-                pipelineData.incrementSuccesses();
-                pipelineData.getResponses().add(response);
-                failureDetector.recordSuccess(response.getNode(), response.getRequestTime());
-                pipelineData.getZoneResponses().add(node.getZoneId());
-            } catch(Exception e) {
-                long requestTime = (System.nanoTime() - start) / Time.NS_PER_MS;
+                    Response<ByteArray, V> response = new Response<ByteArray, V>(node,
+                                                                                 key,
+                                                                                 result,
+                                                                                 ((System.nanoTime() - start) / Time.NS_PER_MS));
 
-                if(handleResponseError(e, node, requestTime, pipeline, failureDetector))
-                    return;
+                    pipelineData.incrementSuccesses();
+                    pipelineData.getResponses().add(response);
+                    failureDetector.recordSuccess(response.getNode(), response.getRequestTime());
+                    pipelineData.getZoneResponses().add(node.getZoneId());
+                } catch(Exception e) {
+                    long requestTime = (System.nanoTime() - start) / Time.NS_PER_MS;
+
+                    if(handleResponseError(e, node, requestTime, pipeline, failureDetector))
+                        return;
+                }
+
+                pipelineData.incrementNodeIndex();
             }
 
-            pipelineData.incrementNodeIndex();
-        }
+            int zonesSatisfied = pipelineData.getZoneResponses().size();
+            if(zonesSatisfied >= (pipelineData.getZonesRequired() + 1)) {
+                pipeline.addEvent(completeEvent);
+            } else {
+                pipelineData.setFatalError(new InsufficientZoneResponsesException((pipelineData.getZonesRequired() + 1)
+                                                                                  + " "
+                                                                                  + pipeline.getOperation()
+                                                                                            .getSimpleName()
+                                                                                  + "s required zone, but only "
+                                                                                  + zonesSatisfied
+                                                                                  + " succeeded"));
 
-        int zonesSatisfied = pipelineData.getZoneResponses().size();
-        if(zonesSatisfied >= (pipelineData.getZonesRequired() + 1)) {
-            pipeline.addEvent(completeEvent);
-        } else {
-            pipelineData.setFatalError(new InsufficientZoneResponsesException((pipelineData.getZonesRequired() + 1)
-                                                                              + " "
-                                                                              + pipeline.getOperation()
-                                                                                        .getSimpleName()
-                                                                              + "s required zone, but only "
-                                                                              + zonesSatisfied
-                                                                              + " succeeded"));
-
-            pipeline.abort();
+                pipeline.abort();
+            }
         }
     }
 }
