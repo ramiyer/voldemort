@@ -15,13 +15,6 @@ import io.opentracing.util.GlobalTracer;
 public class VoldemortTracer {
 
     /**
-     * Helper to get global tracer
-     */
-    public static Tracer getTracer() {
-        return GlobalTracer.get();
-    }
-
-    /**
      * Defines specific tracer based on config, if none is available then uses
      * {@code {@link io.opentracing.noop.NoopTracer}}.
      * Started when server starts up and need to initialized only once.
@@ -36,15 +29,18 @@ public class VoldemortTracer {
         }
     }
 
+    /**
+     * Helper to get global tracer
+     */
+    public static Tracer getTracer() {
+        return GlobalTracer.get();
+    }
+
     /*
      * Helper methods for starting span and scope
      */
     public static Scope activate(Span span, boolean finishSpanOnClose) {
         return getTracer().scopeManager().activate(span, finishSpanOnClose);
-    }
-
-    public static Span startSpan(String operationName) {
-        return getTracer().buildSpan(operationName).start();
     }
 
     public static Tracer.SpanBuilder buildSpan(String operationName) {
