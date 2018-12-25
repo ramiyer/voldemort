@@ -16,9 +16,7 @@
 
 package voldemort.store.routed.action;
 
-import java.util.List;
-import java.util.Map;
-
+import io.opentracing.Scope;
 import voldemort.cluster.Node;
 import voldemort.cluster.failuredetector.FailureDetector;
 import voldemort.store.InsufficientOperationalNodesException;
@@ -29,9 +27,13 @@ import voldemort.store.routed.BasicPipelineData;
 import voldemort.store.routed.Pipeline;
 import voldemort.store.routed.Pipeline.Event;
 import voldemort.store.routed.Response;
+import voldemort.tracer.VoldemortTracer;
 import voldemort.utils.ByteArray;
 import voldemort.utils.ByteUtils;
 import voldemort.utils.Time;
+
+import java.util.List;
+import java.util.Map;
 
 public class PerformSerialRequests<V, PD extends BasicPipelineData<V>> extends
         AbstractKeyBasedAction<ByteArray, V, PD> {
@@ -83,93 +85,95 @@ public class PerformSerialRequests<V, PD extends BasicPipelineData<V>> extends
     public void execute(Pipeline pipeline) {
         List<Node> nodes = pipelineData.getNodes();
 
-        // Now if we had any failures we will be short a few reads. Do serial
-        // reads to make up for these.
-        while(pipelineData.getSuccesses() < preferred && pipelineData.getNodeIndex() < nodes.size()) {
-            Node node = nodes.get(pipelineData.getNodeIndex());
-            long start = System.nanoTime();
+        try (Scope scope = VoldemortTracer.scopeManager().activate(pipelineData.getSpan(), false)) {
+            // Now if we had any failures we will be short a few reads. Do serial
+            // reads to make up for these.
+            while(pipelineData.getSuccesses() < preferred && pipelineData.getNodeIndex() < nodes.size()) {
+                Node node = nodes.get(pipelineData.getNodeIndex());
+                long start = System.nanoTime();
 
-            try {
-                Store<ByteArray, byte[], byte[]> store = stores.get(node.getId());
-                V result = storeRequest.request(store);
+                try {
+                    Store<ByteArray, byte[], byte[]> store = stores.get(node.getId());
+                    V result = storeRequest.request(store);
 
-                Response<ByteArray, V> response = new Response<ByteArray, V>(node,
-                                                                             key,
-                                                                             result,
-                                                                             ((System.nanoTime() - start) / Time.NS_PER_MS));
+                    Response<ByteArray, V> response = new Response<ByteArray, V>(node,
+                                                                                 key,
+                                                                                 result,
+                                                                                 ((System.nanoTime() - start) / Time.NS_PER_MS));
 
-                if(logger.isDebugEnabled())
-                    logger.debug(pipeline.getOperation().getSimpleName() + " for key "
-                                 + ByteUtils.toHexString(key.get()) + " successes: "
-                                 + pipelineData.getSuccesses() + " preferred: " + preferred
-                                 + " required: " + required + " new "
-                                 + pipeline.getOperation().getSimpleName() + " success on node "
-                                 + node.getId());
+                    if(logger.isDebugEnabled())
+                        logger.debug(pipeline.getOperation().getSimpleName() + " for key "
+                                     + ByteUtils.toHexString(key.get()) + " successes: "
+                                     + pipelineData.getSuccesses() + " preferred: " + preferred
+                                     + " required: " + required + " new "
+                                     + pipeline.getOperation().getSimpleName() + " success on node "
+                                     + node.getId());
 
-                pipelineData.incrementSuccesses();
-                pipelineData.getResponses().add(response);
-                failureDetector.recordSuccess(response.getNode(), response.getRequestTime());
-                pipelineData.getZoneResponses().add(node.getZoneId());
-            } catch(Exception e) {
-                long requestTime = (System.nanoTime() - start) / Time.NS_PER_MS;
+                    pipelineData.incrementSuccesses();
+                    pipelineData.getResponses().add(response);
+                    failureDetector.recordSuccess(response.getNode(), response.getRequestTime());
+                    pipelineData.getZoneResponses().add(node.getZoneId());
+                } catch(Exception e) {
+                    long requestTime = (System.nanoTime() - start) / Time.NS_PER_MS;
 
-                if(handleResponseError(e, node, requestTime, pipeline, failureDetector))
-                    return;
+                    if(handleResponseError(e, node, requestTime, pipeline, failureDetector))
+                        return;
+                }
+
+                // break out if we have satisfied everything
+                if(isSatisfied())
+                    break;
+
+                pipelineData.incrementNodeIndex();
             }
 
-            // break out if we have satisfied everything
-            if(isSatisfied())
-                break;
-
-            pipelineData.incrementNodeIndex();
-        }
-
-        if(pipelineData.getSuccesses() < required) {
-            if(insufficientSuccessesEvent != null) {
-                pipeline.addEvent(insufficientSuccessesEvent);
-            } else {
-                pipelineData.setFatalError(new InsufficientOperationalNodesException(required
-                                                                                             + " "
-                                                                                             + pipeline.getOperation()
-                                                                                                       .getSimpleName()
-                                                                                             + "s required, but only "
-                                                                                             + pipelineData.getSuccesses()
-                                                                                             + " succeeded",
-                                                                                     pipelineData.getReplicationSet(),
-                                                                                     pipelineData.getNodes(),
-                                                                                     pipelineData.getFailedNodes(),
-                                                                                     pipelineData.getFailures()));
-
-                pipeline.abort();
-            }
-        } else {
-            if(pipelineData.getZonesRequired() != null) {
-
-                int zonesSatisfied = pipelineData.getZoneResponses().size();
-                if(zonesSatisfied >= (pipelineData.getZonesRequired() + 1)) {
-                    pipeline.addEvent(completeEvent);
+            if(pipelineData.getSuccesses() < required) {
+                if(insufficientSuccessesEvent != null) {
+                    pipeline.addEvent(insufficientSuccessesEvent);
                 } else {
-                    // if you run with zoneCountReads > 0, we could frequently
-                    // run into this exception since our preference list for
-                    // zone routing is laid out thus : <a node from each of
-                    // 'zoneCountReads' zones>, <nodes from local zone>, <nodes
-                    // from remote zone1>, <nodes from remote zone2>,...
-                    // #preferred number of reads may not be able to satisfy
-                    // zoneCountReads, if the original read to a remote node
-                    // fails in the parallel stage
-                    pipelineData.setFatalError(new InsufficientZoneResponsesException((pipelineData.getZonesRequired() + 1)
-                                                                                      + " "
-                                                                                      + pipeline.getOperation()
-                                                                                                .getSimpleName()
-                                                                                      + "s required zone, but only "
-                                                                                      + zonesSatisfied
-                                                                                      + " succeeded"));
+                    pipelineData.setFatalError(new InsufficientOperationalNodesException(required
+                                                                                         + " "
+                                                                                         + pipeline.getOperation()
+                                                                                                   .getSimpleName()
+                                                                                         + "s required, but only "
+                                                                                         + pipelineData.getSuccesses()
+                                                                                         + " succeeded",
+                                                                                         pipelineData.getReplicationSet(),
+                                                                                         pipelineData.getNodes(),
+                                                                                         pipelineData.getFailedNodes(),
+                                                                                         pipelineData.getFailures()));
 
                     pipeline.abort();
                 }
-
             } else {
-                pipeline.addEvent(completeEvent);
+                if(pipelineData.getZonesRequired() != null) {
+
+                    int zonesSatisfied = pipelineData.getZoneResponses().size();
+                    if(zonesSatisfied >= (pipelineData.getZonesRequired() + 1)) {
+                        pipeline.addEvent(completeEvent);
+                    } else {
+                        // if you run with zoneCountReads > 0, we could frequently
+                        // run into this exception since our preference list for
+                        // zone routing is laid out thus : <a node from each of
+                        // 'zoneCountReads' zones>, <nodes from local zone>, <nodes
+                        // from remote zone1>, <nodes from remote zone2>,...
+                        // #preferred number of reads may not be able to satisfy
+                        // zoneCountReads, if the original read to a remote node
+                        // fails in the parallel stage
+                        pipelineData.setFatalError(new InsufficientZoneResponsesException((pipelineData.getZonesRequired() + 1)
+                                                                                          + " "
+                                                                                          + pipeline.getOperation()
+                                                                                                    .getSimpleName()
+                                                                                          + "s required zone, but only "
+                                                                                          + zonesSatisfied
+                                                                                          + " succeeded"));
+
+                        pipeline.abort();
+                    }
+
+                } else {
+                    pipeline.addEvent(completeEvent);
+                }
             }
         }
     }

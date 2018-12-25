@@ -16,13 +16,8 @@
 
 package voldemort.store.routed;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-
+import io.opentracing.Scope;
+import io.opentracing.Span;
 import voldemort.VoldemortException;
 import voldemort.client.TimeoutConfig;
 import voldemort.client.ZoneAffinity;
@@ -67,11 +62,19 @@ import voldemort.store.slop.Slop;
 import voldemort.store.slop.strategy.HintedHandoffStrategy;
 import voldemort.store.slop.strategy.HintedHandoffStrategyFactory;
 import voldemort.store.system.SystemStoreConstants;
+import voldemort.tracer.VoldemortTracer;
 import voldemort.utils.ByteArray;
 import voldemort.utils.ByteUtils;
 import voldemort.utils.SystemTime;
 import voldemort.versioning.Version;
 import voldemort.versioning.Versioned;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * A Store which multiplexes requests to different internal Stores
@@ -284,118 +287,120 @@ public class PipelineRoutedStore extends RoutedStore {
 
         long startTimeMs = -1;
         long startTimeNs = -1;
-
-        if(logger.isDebugEnabled()) {
-            startTimeMs = System.currentTimeMillis();
-            startTimeNs = System.nanoTime();
-        }
-
-        BasicPipelineData<List<Versioned<byte[]>>> pipelineData = new BasicPipelineData<List<Versioned<byte[]>>>();
-        if(zoneRoutingEnabled)
-            pipelineData.setZonesRequired(storeDef.getZoneCountReads());
-        else
-            pipelineData.setZonesRequired(null);
-        pipelineData.setStats(stats);
-        pipelineData.setStoreName(getName());
-
-        final Pipeline pipeline = new Pipeline(Operation.GET, getOpTimeout, TimeUnit.MILLISECONDS);
-        boolean allowReadRepair = repairReads && transforms == null;
-
-        StoreRequest<List<Versioned<byte[]>>> blockingStoreRequest = new StoreRequest<List<Versioned<byte[]>>>() {
-
-            @Override
-            public List<Versioned<byte[]>> request(Store<ByteArray, byte[], byte[]> store) {
-                return store.get(key, transforms);
+        try (Scope scope = VoldemortTracer.operationTrace(getClass().getName(), key.toString(), Operation.GET.getSimpleName())) {
+            if(logger.isDebugEnabled()) {
+                startTimeMs = System.currentTimeMillis();
+                startTimeNs = System.nanoTime();
             }
 
-        };
+            BasicPipelineData<List<Versioned<byte[]>>> pipelineData = new BasicPipelineData<List<Versioned<byte[]>>>();
+            if(zoneRoutingEnabled)
+                pipelineData.setZonesRequired(storeDef.getZoneCountReads());
+            else
+                pipelineData.setZonesRequired(null);
+            pipelineData.setStats(stats);
+            pipelineData.setStoreName(getName());
+            pipelineData.span = scope.span();
 
-        // Get the correct type of configure nodes action depending on the store
-        // requirements
-        AbstractConfigureNodes<ByteArray, List<Versioned<byte[]>>, BasicPipelineData<List<Versioned<byte[]>>>> configureNodes = makeNodeConfigurationForGet(pipelineData,
-                                                                                                                                                            key);
+            final Pipeline pipeline = new Pipeline(Operation.GET, getOpTimeout, TimeUnit.MILLISECONDS, scope.span());
+            boolean allowReadRepair = repairReads && transforms == null;
+            StoreRequest<List<Versioned<byte[]>>> blockingStoreRequest = new StoreRequest<List<Versioned<byte[]>>>() {
 
-        pipeline.addEventAction(Event.STARTED, configureNodes);
+                @Override
+                public List<Versioned<byte[]>> request(Store<ByteArray, byte[], byte[]> store) {
+                    return store.get(key, transforms);
+                }
+            };
 
-        pipeline.addEventAction(Event.CONFIGURED,
-                                new PerformParallelRequests<List<Versioned<byte[]>>, BasicPipelineData<List<Versioned<byte[]>>>>(pipelineData,
-                                                                                                                                 allowReadRepair ? Event.RESPONSES_RECEIVED
-                                                                                                                                                : Event.COMPLETED,
-                                                                                                                                 key,
-                                                                                                                                 transforms,
-                                                                                                                                 failureDetector,
-                                                                                                                                 storeDef.getPreferredReads(),
-                                                                                                                                 storeDef.getRequiredReads(),
-                                                                                                                                 getOpTimeout,
-                                                                                                                                 nonblockingStores,
-                                                                                                                                 Event.INSUFFICIENT_SUCCESSES,
-                                                                                                                                 Event.INSUFFICIENT_ZONES));
-        pipeline.addEventAction(Event.INSUFFICIENT_SUCCESSES,
-                                new PerformSerialRequests<List<Versioned<byte[]>>, BasicPipelineData<List<Versioned<byte[]>>>>(pipelineData,
-                                                                                                                               allowReadRepair ? Event.RESPONSES_RECEIVED
-                                                                                                                                              : Event.COMPLETED,
-                                                                                                                               key,
-                                                                                                                               failureDetector,
-                                                                                                                               innerStores,
-                                                                                                                               storeDef.getPreferredReads(),
-                                                                                                                               storeDef.getRequiredReads(),
-                                                                                                                               blockingStoreRequest,
-                                                                                                                               null));
+            // Get the correct type of configure nodes action depending on the store
+            // requirements
+            AbstractConfigureNodes<ByteArray, List<Versioned<byte[]>>, BasicPipelineData<List<Versioned<byte[]>>>> configureNodes = makeNodeConfigurationForGet(pipelineData,
+                                                                                                                                                                key);
 
-        if(allowReadRepair)
-            pipeline.addEventAction(Event.RESPONSES_RECEIVED,
-                                    new ReadRepair<BasicPipelineData<List<Versioned<byte[]>>>>(pipelineData,
-                                                                                               Event.COMPLETED,
-                                                                                               storeDef.getPreferredReads(),
-                                                                                               getOpTimeout,
-                                                                                               nonblockingStores,
-                                                                                               readRepairer));
+            pipeline.addEventAction(Event.STARTED, configureNodes);
 
-        if(zoneRoutingEnabled)
-            pipeline.addEventAction(Event.INSUFFICIENT_ZONES,
-                                    new PerformZoneSerialRequests<List<Versioned<byte[]>>, BasicPipelineData<List<Versioned<byte[]>>>>(pipelineData,
-                                                                                                                                       allowReadRepair ? Event.RESPONSES_RECEIVED
-                                                                                                                                                      : Event.COMPLETED,
-                                                                                                                                       key,
-                                                                                                                                       failureDetector,
-                                                                                                                                       innerStores,
-                                                                                                                                       blockingStoreRequest));
+            pipeline.addEventAction(Event.CONFIGURED,
+                                    new PerformParallelRequests<List<Versioned<byte[]>>, BasicPipelineData<List<Versioned<byte[]>>>>(pipelineData,
+                                                                                                                                     allowReadRepair ? Event.RESPONSES_RECEIVED
+                                                                                                                                                     : Event.COMPLETED,
+                                                                                                                                     key,
+                                                                                                                                     transforms,
+                                                                                                                                     failureDetector,
+                                                                                                                                     storeDef.getPreferredReads(),
+                                                                                                                                     storeDef.getRequiredReads(),
+                                                                                                                                     getOpTimeout,
+                                                                                                                                     nonblockingStores,
+                                                                                                                                     Event.INSUFFICIENT_SUCCESSES,
+                                                                                                                                     Event.INSUFFICIENT_ZONES));
+            pipeline.addEventAction(Event.INSUFFICIENT_SUCCESSES,
+                                    new PerformSerialRequests<List<Versioned<byte[]>>, BasicPipelineData<List<Versioned<byte[]>>>>(pipelineData,
+                                                                                                                                   allowReadRepair ? Event.RESPONSES_RECEIVED
+                                                                                                                                                   : Event.COMPLETED,
+                                                                                                                                   key,
+                                                                                                                                   failureDetector,
+                                                                                                                                   innerStores,
+                                                                                                                                   storeDef.getPreferredReads(),
+                                                                                                                                   storeDef.getRequiredReads(),
+                                                                                                                                   blockingStoreRequest,
+                                                                                                                                   null));
 
-        pipeline.addEvent(Event.STARTED);
+            if(allowReadRepair)
+                scope.span().setTag("allowReadRepair", true);
+                pipeline.addEventAction(Event.RESPONSES_RECEIVED,
+                                        new ReadRepair<BasicPipelineData<List<Versioned<byte[]>>>>(pipelineData,
+                                                                                                   Event.COMPLETED,
+                                                                                                   storeDef.getPreferredReads(),
+                                                                                                   getOpTimeout,
+                                                                                                   nonblockingStores,
+                                                                                                   readRepairer));
 
-        if(logger.isDebugEnabled()) {
-            logger.debug("Operation " + pipeline.getOperation().getSimpleName() + " Key "
-                         + ByteUtils.toHexString(key.get()));
+            if(zoneRoutingEnabled)
+                scope.span().setTag("zoneRoutingEnabled", true);
+                pipeline.addEventAction(Event.INSUFFICIENT_ZONES,
+                                        new PerformZoneSerialRequests<List<Versioned<byte[]>>, BasicPipelineData<List<Versioned<byte[]>>>>(pipelineData,
+                                                                                                                                           allowReadRepair ? Event.RESPONSES_RECEIVED
+                                                                                                                                                           : Event.COMPLETED,
+                                                                                                                                           key,
+                                                                                                                                           failureDetector,
+                                                                                                                                           innerStores,
+                                                                                                                                           blockingStoreRequest));
+
+            pipeline.addEvent(Event.STARTED);
+
+            if(logger.isDebugEnabled()) {
+                logger.debug("Operation " + pipeline.getOperation().getSimpleName() + " Key "
+                             + ByteUtils.toHexString(key.get()));
+            }
+
+            try {
+                pipeline.execute();
+            } catch(VoldemortException e) {
+                stats.reportException(e);
+                throw e;
+            }
+
+            if(pipelineData.getFatalError() != null)
+                throw pipelineData.getFatalError();
+
+            List<Versioned<byte[]>> results = new ArrayList<Versioned<byte[]>>();
+
+            for(Response<ByteArray, List<Versioned<byte[]>>> response: pipelineData.getResponses()) {
+                List<Versioned<byte[]>> value = response.getValue();
+
+                if(value != null)
+                    results.addAll(value);
+            }
+
+            if(logger.isDebugEnabled()) {
+                logger.debug("Finished " + pipeline.getOperation().getSimpleName() + " for key "
+                             + ByteUtils.toHexString(key.get()) + " keyRef: "
+                             + System.identityHashCode(key) + "; started at " + startTimeMs + " took "
+                             + (System.nanoTime() - startTimeNs) + " values: "
+                             + formatNodeValuesFromGet(pipelineData.getResponses()));
+            }
+
+            return results;
         }
-
-        try {
-            pipeline.execute();
-        } catch(VoldemortException e) {
-            stats.reportException(e);
-            throw e;
-        }
-
-        if(pipelineData.getFatalError() != null)
-            throw pipelineData.getFatalError();
-
-        List<Versioned<byte[]>> results = new ArrayList<Versioned<byte[]>>();
-
-        for(Response<ByteArray, List<Versioned<byte[]>>> response: pipelineData.getResponses()) {
-            List<Versioned<byte[]>> value = response.getValue();
-
-            if(value != null)
-                results.addAll(value);
-        }
-
-        if(logger.isDebugEnabled()) {
-            logger.debug("Finished " + pipeline.getOperation().getSimpleName() + " for key "
-                         + ByteUtils.toHexString(key.get()) + " keyRef: "
-                         + System.identityHashCode(key) + "; started at " + startTimeMs + " took "
-                         + (System.nanoTime() - startTimeNs) + " values: "
-                         + formatNodeValuesFromGet(pipelineData.getResponses()));
-        }
-
-        return results;
     }
 
     private String formatNodeValuesFromGet(List<Response<ByteArray, List<Versioned<byte[]>>>> results) {
@@ -823,112 +828,123 @@ public class PipelineRoutedStore extends RoutedStore {
         long startTimeMs = -1;
         long startTimeNs = -1;
 
-        if(logger.isDebugEnabled()) {
-            startTimeMs = System.currentTimeMillis();
-            startTimeNs = System.nanoTime();
+        Span spanClose = null;
+        try (Scope scope = VoldemortTracer.operationTrace(getClass().getName(), key.toString(), Operation.PUT.getSimpleName())) {
+
+            spanClose = scope.span();
+            if(logger.isDebugEnabled()) {
+                startTimeMs = System.currentTimeMillis();
+                startTimeNs = System.nanoTime();
+            }
+
+            StoreUtils.assertValidKey(key);
+            PutPipelineData pipelineData = new PutPipelineData();
+            if(zoneRoutingEnabled)
+                pipelineData.setZonesRequired(storeDef.getZoneCountWrites());
+            else
+                pipelineData.setZonesRequired(null);
+            pipelineData.setStartTimeNs(System.nanoTime());
+            pipelineData.setStoreName(getName());
+            pipelineData.setStats(stats);
+            pipelineData.span = scope.span();
+
+            Pipeline pipeline = new Pipeline(Operation.PUT, putOpTimeoutInMs, TimeUnit.MILLISECONDS, scope.span());
+            pipeline.setEnableHintedHandoff(isHintedHandoffEnabled());
+
+            HintedHandoff hintedHandoff = null;
+
+            // Get the correct type of configure nodes action depending on the store
+            // requirements
+            AbstractConfigureNodes<ByteArray, Void, PutPipelineData> configureNodes = makeNodeConfigurationForPut(pipelineData,
+                                                                                                                  key);
+
+            if(isHintedHandoffEnabled())
+                hintedHandoff = new HintedHandoff(failureDetector,
+                                                  slopStores,
+                                                  nonblockingSlopStores,
+                                                  handoffStrategy,
+                                                  pipelineData.getFailedNodes(),
+                                                  putOpTimeoutInMs);
+
+            pipeline.addEventAction(Event.STARTED, configureNodes);
+
+            pipeline.addEventAction(Event.CONFIGURED,
+                                    new PerformSerialPutRequests(pipelineData,
+                                                                 isHintedHandoffEnabled() ? Event.RESPONSES_RECEIVED
+                                                                                          : Event.COMPLETED,
+                                                                 key,
+                                                                 transforms,
+                                                                 failureDetector,
+                                                                 innerStores,
+                                                                 storeDef.getRequiredWrites(),
+                                                                 versioned,
+                                                                 time,
+                                                                 Event.MASTER_DETERMINED));
+            pipeline.addEventAction(Event.MASTER_DETERMINED,
+                                    new PerformParallelPutRequests(pipelineData,
+                                                                   Event.RESPONSES_RECEIVED,
+                                                                   key,
+                                                                   transforms,
+                                                                   failureDetector,
+                                                                   storeDef.getPreferredWrites(),
+                                                                   storeDef.getRequiredWrites(),
+                                                                   putOpTimeoutInMs,
+                                                                   nonblockingStores,
+                                                                   hintedHandoff));
+            if(isHintedHandoffEnabled()) {
+                scope.span().setTag("isHintedHandoffEnabled", true);
+                pipeline.addEventAction(Event.ABORTED, new PerformPutHintedHandoff(pipelineData,
+                                                                                   Event.ERROR,
+                                                                                   key,
+                                                                                   versioned,
+                                                                                   transforms,
+                                                                                   hintedHandoff,
+                                                                                   time));
+                pipeline.addEventAction(Event.RESPONSES_RECEIVED,
+                                        new PerformPutHintedHandoff(pipelineData,
+                                                                    Event.HANDOFF_FINISHED,
+                                                                    key,
+                                                                    versioned,
+                                                                    transforms,
+                                                                    hintedHandoff,
+                                                                    time));
+                pipeline.addEventAction(Event.HANDOFF_FINISHED, new IncrementClock(pipelineData,
+                                                                                   Event.COMPLETED,
+                                                                                   versioned,
+                                                                                   time));
+            } else {
+                scope.span().setTag("isHintedHandoffEnabled", false);
+                pipeline.addEventAction(Event.RESPONSES_RECEIVED, new IncrementClock(pipelineData,
+                                                                                     Event.COMPLETED,
+                                                                                     versioned,
+                                                                                     time));
+            }
+            pipeline.addEvent(Event.STARTED);
+            if(logger.isDebugEnabled()) {
+                logger.debug("Operation " + pipeline.getOperation().getSimpleName() + " Key "
+                             + ByteUtils.toHexString(key.get()));
+            }
+            try (Scope pipe = VoldemortTracer.scopeManager().activate(scope.span(), false)) {
+                pipeline.execute();
+            } catch(VoldemortException e) {
+                stats.reportException(e);
+                throw e;
+            }
+
+            if(logger.isDebugEnabled()) {
+                logger.debug("Finished " + pipeline.getOperation().getSimpleName() + " for key "
+                             + ByteUtils.toHexString(key.get()) + " keyRef: "
+                             + System.identityHashCode(key) + "; started at " + startTimeMs + " took "
+                             + (System.nanoTime() - startTimeNs) + " value: " + versioned.getValue()
+                             + " (size: " + versioned.getValue().length + ")");
+            }
+
+            if(pipelineData.getFatalError() != null)
+                throw pipelineData.getFatalError();
+        } finally {
+            if (spanClose != null)
+                spanClose.finish();
         }
-
-        StoreUtils.assertValidKey(key);
-        PutPipelineData pipelineData = new PutPipelineData();
-        if(zoneRoutingEnabled)
-            pipelineData.setZonesRequired(storeDef.getZoneCountWrites());
-        else
-            pipelineData.setZonesRequired(null);
-        pipelineData.setStartTimeNs(System.nanoTime());
-        pipelineData.setStoreName(getName());
-        pipelineData.setStats(stats);
-
-        Pipeline pipeline = new Pipeline(Operation.PUT, putOpTimeoutInMs, TimeUnit.MILLISECONDS);
-        pipeline.setEnableHintedHandoff(isHintedHandoffEnabled());
-
-        HintedHandoff hintedHandoff = null;
-
-        // Get the correct type of configure nodes action depending on the store
-        // requirements
-        AbstractConfigureNodes<ByteArray, Void, PutPipelineData> configureNodes = makeNodeConfigurationForPut(pipelineData,
-                                                                                                              key);
-
-        if(isHintedHandoffEnabled())
-            hintedHandoff = new HintedHandoff(failureDetector,
-                                              slopStores,
-                                              nonblockingSlopStores,
-                                              handoffStrategy,
-                                              pipelineData.getFailedNodes(),
-                                              putOpTimeoutInMs);
-
-        pipeline.addEventAction(Event.STARTED, configureNodes);
-
-        pipeline.addEventAction(Event.CONFIGURED,
-                                new PerformSerialPutRequests(pipelineData,
-                                                             isHintedHandoffEnabled() ? Event.RESPONSES_RECEIVED
-                                                                                     : Event.COMPLETED,
-                                                             key,
-                                                             transforms,
-                                                             failureDetector,
-                                                             innerStores,
-                                                             storeDef.getRequiredWrites(),
-                                                             versioned,
-                                                             time,
-                                                             Event.MASTER_DETERMINED));
-        pipeline.addEventAction(Event.MASTER_DETERMINED,
-                                new PerformParallelPutRequests(pipelineData,
-                                                               Event.RESPONSES_RECEIVED,
-                                                               key,
-                                                               transforms,
-                                                               failureDetector,
-                                                               storeDef.getPreferredWrites(),
-                                                               storeDef.getRequiredWrites(),
-                                                               putOpTimeoutInMs,
-                                                               nonblockingStores,
-                                                               hintedHandoff));
-        if(isHintedHandoffEnabled()) {
-            pipeline.addEventAction(Event.ABORTED, new PerformPutHintedHandoff(pipelineData,
-                                                                               Event.ERROR,
-                                                                               key,
-                                                                               versioned,
-                                                                               transforms,
-                                                                               hintedHandoff,
-                                                                               time));
-            pipeline.addEventAction(Event.RESPONSES_RECEIVED,
-                                    new PerformPutHintedHandoff(pipelineData,
-                                                                Event.HANDOFF_FINISHED,
-                                                                key,
-                                                                versioned,
-                                                                transforms,
-                                                                hintedHandoff,
-                                                                time));
-            pipeline.addEventAction(Event.HANDOFF_FINISHED, new IncrementClock(pipelineData,
-                                                                               Event.COMPLETED,
-                                                                               versioned,
-                                                                               time));
-        } else
-            pipeline.addEventAction(Event.RESPONSES_RECEIVED, new IncrementClock(pipelineData,
-                                                                                 Event.COMPLETED,
-                                                                                 versioned,
-                                                                                 time));
-
-        pipeline.addEvent(Event.STARTED);
-        if(logger.isDebugEnabled()) {
-            logger.debug("Operation " + pipeline.getOperation().getSimpleName() + " Key "
-                         + ByteUtils.toHexString(key.get()));
-        }
-        try {
-            pipeline.execute();
-        } catch(VoldemortException e) {
-            stats.reportException(e);
-            throw e;
-        }
-
-        if(logger.isDebugEnabled()) {
-            logger.debug("Finished " + pipeline.getOperation().getSimpleName() + " for key "
-                         + ByteUtils.toHexString(key.get()) + " keyRef: "
-                         + System.identityHashCode(key) + "; started at " + startTimeMs + " took "
-                         + (System.nanoTime() - startTimeNs) + " value: " + versioned.getValue()
-                         + " (size: " + versioned.getValue().length + ")");
-        }
-
-        if(pipelineData.getFatalError() != null)
-            throw pipelineData.getFatalError();
     }
 
     @Override

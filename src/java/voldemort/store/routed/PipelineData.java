@@ -16,13 +16,14 @@
 
 package voldemort.store.routed;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
-
+import io.opentracing.Span;
 import voldemort.VoldemortException;
 import voldemort.cluster.Node;
 import voldemort.store.routed.Pipeline.Event;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * PipelineData includes a common set of data that is used to represent the
@@ -74,6 +75,8 @@ public abstract class PipelineData<K, V> {
     protected List<Node> replicationSet;
 
     protected PipelineRoutedStats stats;
+
+    protected Span span;
 
     public void setStats(PipelineRoutedStats stats) {
         this.stats = stats;
@@ -171,5 +174,9 @@ public abstract class PipelineData<K, V> {
         if(stats != null) {
             stats.reportException(e);
         }
+    }
+
+    public Span getSpan() {
+        return span;
     }
 }

@@ -16,17 +16,17 @@
 
 package voldemort.store.routed;
 
+import io.opentracing.Span;
+import org.apache.log4j.Logger;
+import voldemort.VoldemortException;
+import voldemort.store.InsufficientOperationalNodesException;
+import voldemort.store.routed.action.Action;
+
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-
-import org.apache.log4j.Logger;
-
-import voldemort.VoldemortException;
-import voldemort.store.InsufficientOperationalNodesException;
-import voldemort.store.routed.action.Action;
 
 /**
  * A Pipeline is the main conduit through which an {@link Action} is run. An
@@ -92,6 +92,7 @@ public class Pipeline {
 
     private volatile boolean finished = false;
 
+    private Span span;
     /**
      * 
      * @param operation
@@ -100,12 +101,18 @@ public class Pipeline {
      */
 
     public Pipeline(Operation operation, long timeout, TimeUnit unit) {
+        this(operation, timeout, unit, null);
+    }
+
+    public Pipeline(Operation operation, long timeout, TimeUnit unit, Span span) {
         this.operation = operation;
         this.timeout = timeout;
         this.unit = unit;
         this.eventQueue = new LinkedBlockingQueue<Event>();
         this.eventActions = new ConcurrentHashMap<Event, Action>();
+        this.span = span;
     }
+
 
     public Operation getOperation() {
         return operation;
