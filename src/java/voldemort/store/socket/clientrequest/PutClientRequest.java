@@ -16,14 +16,15 @@
 
 package voldemort.store.socket.clientrequest;
 
+import io.opentracing.Scope;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-
 import voldemort.client.protocol.RequestFormat;
 import voldemort.common.nio.ByteBufferBackedOutputStream;
 import voldemort.server.RequestRoutingType;
+import voldemort.tracer.VoldemortTracer;
 import voldemort.utils.ByteArray;
 import voldemort.versioning.VectorClock;
 import voldemort.versioning.Versioned;
@@ -55,22 +56,27 @@ public class PutClientRequest extends AbstractStoreClientRequest<Void> {
     @Override
     protected void formatRequestInternal(ByteBufferBackedOutputStream outputStream)
             throws IOException {
-        int size = requestFormat.getExpectedPutRequestSize(storeName,
-                                                   key,
-                                                   versioned.getValue(),
-                                                   transforms,
-                                                   (VectorClock) versioned.getVersion(),
-                                                   requestRoutingType);
-        if(size != RequestFormat.SIZE_UNKNOWN) {
-            outputStream.getBufferContainer().ensureSpace(size);
+
+        try (Scope scope = VoldemortTracer.activate(super.span, false)) {
+            super.span.setTag("key", key.toString());
+            super.span.setTag("routingType", requestRoutingType.getRoutingTypeCode());
+            int size = requestFormat.getExpectedPutRequestSize(storeName,
+                                                               key,
+                                                               versioned.getValue(),
+                                                               transforms,
+                                                               (VectorClock) versioned.getVersion(),
+                                                               requestRoutingType);
+            if(size != RequestFormat.SIZE_UNKNOWN) {
+                outputStream.getBufferContainer().ensureSpace(size);
+            }
+            requestFormat.writePutRequest(new DataOutputStream(outputStream),
+                                          storeName,
+                                          key,
+                                          versioned.getValue(),
+                                          transforms,
+                                          (VectorClock) versioned.getVersion(),
+                                          requestRoutingType);
         }
-        requestFormat.writePutRequest(new DataOutputStream(outputStream),
-                                      storeName,
-                                      key,
-                                      versioned.getValue(),
-                                      transforms,
-                                      (VectorClock) versioned.getVersion(),
-                                      requestRoutingType);
     }
 
     @Override

@@ -16,17 +16,19 @@
 
 package voldemort.store.socket.clientrequest;
 
+import io.opentracing.Scope;
+import voldemort.client.protocol.RequestFormat;
+import voldemort.common.nio.ByteBufferBackedOutputStream;
+import voldemort.server.RequestRoutingType;
+import voldemort.tracer.VoldemortTracer;
+import voldemort.utils.ByteArray;
+import voldemort.versioning.Versioned;
+
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
-
-import voldemort.client.protocol.RequestFormat;
-import voldemort.common.nio.ByteBufferBackedOutputStream;
-import voldemort.server.RequestRoutingType;
-import voldemort.utils.ByteArray;
-import voldemort.versioning.Versioned;
 
 public class GetClientRequest extends AbstractStoreClientRequest<List<Versioned<byte[]>>> {
 
@@ -50,11 +52,15 @@ public class GetClientRequest extends AbstractStoreClientRequest<List<Versioned<
     @Override
     protected void formatRequestInternal(ByteBufferBackedOutputStream outputStream)
             throws IOException {
-        requestFormat.writeGetRequest(new DataOutputStream(outputStream),
-                                      storeName,
-                                      key,
-                                      transforms,
-                                      requestRoutingType);
+        try (Scope scope = VoldemortTracer.activate(super.span, false)) {
+            super.span.setTag("key", key.toString());
+            super.span.setTag("routingType", requestRoutingType.getRoutingTypeCode());
+            requestFormat.writeGetRequest(new DataOutputStream(outputStream),
+                                          storeName,
+                                          key,
+                                          transforms,
+                                          requestRoutingType);
+        }
     }
 
     @Override

@@ -16,8 +16,10 @@
 
 package voldemort.store.socket.clientrequest;
 
+import io.opentracing.Span;
 import voldemort.client.protocol.RequestFormat;
 import voldemort.server.RequestRoutingType;
+import voldemort.tracer.VoldemortTracer;
 
 public abstract class AbstractStoreClientRequest<T> extends AbstractClientRequest<T> {
 
@@ -27,12 +29,15 @@ public abstract class AbstractStoreClientRequest<T> extends AbstractClientReques
 
     protected final RequestRoutingType requestRoutingType;
 
+    protected Span span;
+
     public AbstractStoreClientRequest(String storeName,
                                       RequestFormat requestFormat,
                                       RequestRoutingType requestRoutingType) {
         this.storeName = storeName;
         this.requestFormat = requestFormat;
         this.requestRoutingType = requestRoutingType;
+        this.span = VoldemortTracer.buildSpan(storeName).start();
     }
 
 }
