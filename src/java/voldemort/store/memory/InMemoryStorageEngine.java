@@ -16,20 +16,13 @@
 
 package voldemort.store.memory;
 
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-
+import io.opentracing.Scope;
 import org.apache.log4j.Logger;
-
 import voldemort.VoldemortException;
 import voldemort.annotations.concurrency.NotThreadsafe;
 import voldemort.store.AbstractStorageEngine;
 import voldemort.store.StoreUtils;
+import voldemort.tracer.VoldemortTracer;
 import voldemort.utils.ClosableIterator;
 import voldemort.utils.Pair;
 import voldemort.utils.Utils;
@@ -37,6 +30,14 @@ import voldemort.versioning.ObsoleteVersionException;
 import voldemort.versioning.Occurred;
 import voldemort.versioning.Version;
 import voldemort.versioning.Versioned;
+
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 /**
  * A simple non-persistent, in-memory store. Useful for unit testing.
@@ -106,12 +107,16 @@ public class InMemoryStorageEngine<K, V, T> extends AbstractStorageEngine<K, V, 
 
     @Override
     public synchronized List<Versioned<V>> get(K key, T transform) throws VoldemortException {
-        StoreUtils.assertValidKey(key);
-        List<Versioned<V>> results = map.get(key);
-        if(results == null) {
-            return new ArrayList<Versioned<V>>(0);
-        } else {
-            return new ArrayList<Versioned<V>>(results);
+        try(Scope inmem = VoldemortTracer.buildSpan(getClass().getName()).startActive(false)) {
+            inmem.span().setTag("K", key.toString());
+            inmem.span().setTag("op", "GET");
+            StoreUtils.assertValidKey(key);
+            List<Versioned<V>> results = map.get(key);
+            if(results == null) {
+                return new ArrayList<Versioned<V>>(0);
+            } else {
+                return new ArrayList<Versioned<V>>(results);
+            }
         }
     }
 
@@ -124,27 +129,32 @@ public class InMemoryStorageEngine<K, V, T> extends AbstractStorageEngine<K, V, 
 
     @Override
     public synchronized void put(K key, Versioned<V> value, T transforms) throws VoldemortException {
-        StoreUtils.assertValidKey(key);
-        List<Versioned<V>> items = map.get(key);
-        // If we have no value, add the current value
-        if(items == null) {
-            items = new ArrayList<Versioned<V>>();
-        }
-        // Check for existing versions - remember which items to
-        // remove in case of success
-        List<Versioned<V>> itemsToRemove = new ArrayList<Versioned<V>>(items.size());
-        for(Versioned<V> versioned: items) {
-            Occurred occurred = value.getVersion().compare(versioned.getVersion());
-            if(occurred == Occurred.BEFORE) {
-                throw new ObsoleteVersionException("Obsolete version for key '" + key + "': "
-                                                   + value.getVersion());
-            } else if(occurred == Occurred.AFTER) {
-                itemsToRemove.add(versioned);
+
+        try(Scope inmem = VoldemortTracer.buildSpan(getClass().getName()).startActive(false)) {
+            inmem.span().setTag("K", key.toString());
+            inmem.span().setTag("op", "PUT");
+            StoreUtils.assertValidKey(key);
+            List<Versioned<V>> items = map.get(key);
+            // If we have no value, add the current value
+            if(items == null) {
+                items = new ArrayList<Versioned<V>>();
             }
+            // Check for existing versions - remember which items to
+            // remove in case of success
+            List<Versioned<V>> itemsToRemove = new ArrayList<Versioned<V>>(items.size());
+            for(Versioned<V> versioned: items) {
+                Occurred occurred = value.getVersion().compare(versioned.getVersion());
+                if(occurred == Occurred.BEFORE) {
+                    throw new ObsoleteVersionException("Obsolete version for key '" + key + "': "
+                                                       + value.getVersion());
+                } else if(occurred == Occurred.AFTER) {
+                    itemsToRemove.add(versioned);
+                }
+            }
+            items.removeAll(itemsToRemove);
+            items.add(value);
+            map.put(key, items);
         }
-        items.removeAll(itemsToRemove);
-        items.add(value);
-        map.put(key, items);
     }
 
     @Override
