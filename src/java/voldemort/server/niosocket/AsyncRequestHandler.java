@@ -16,6 +16,7 @@
 
 package voldemort.server.niosocket;
 
+import io.opentracing.Scope;
 import java.io.Closeable;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -42,6 +43,7 @@ import voldemort.server.protocol.RequestHandlerFactory;
 import voldemort.server.protocol.StreamRequestHandler;
 import voldemort.server.protocol.StreamRequestHandler.StreamRequestDirection;
 import voldemort.server.protocol.StreamRequestHandler.StreamRequestHandlerState;
+import voldemort.tracer.VoldemortTracer;
 import voldemort.utils.ByteUtils;
 
 /**
@@ -351,7 +353,7 @@ public class AsyncRequestHandler extends SelectorManagerWorker implements Closea
             throws IOException {
         StreamRequestHandlerState state = null;
 
-        try {
+        try (Scope scope = VoldemortTracer.buildSpan("handle-stream-request").startActive(true)) {
             if(logger.isTraceEnabled())
                 traceInputBufferState("Before streaming request handler");
 
